@@ -1,0 +1,708 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © facejungle
+//@version=5
+strategy('2Mars strategy [OKX]',
+	 shorttitle         = '2Mars [OKX]', 
+     overlay            = true,
+	 initial_capital    = 10000,
+	 pyramiding         = 3,
+	 currency           = currency.USD,
+	 default_qty_type   = strategy.percent_of_equity,
+	 default_qty_value  = 5,
+     commission_type    = strategy.commission.percent,
+	 commission_value   = 0.1,
+     margin_long        = 100.0,
+	 margin_short       = 100.0,
+	 max_bars_back      = 5000,
+	 calc_on_every_tick = false 
+	 )
+
+import facejungle/utils/14 as utils
+
+string GENERAL_GRP = 'General'
+float priceSource  = input.source(close, 'Source', group=GENERAL_GRP, display = display.none)
+int barsConfirm    = input.int(2, 'Bars confirm', minval=1, step=1, display = display.none, group=GENERAL_GRP)
+
+string ST_GRP                     = "SuperTrend"
+bool useSuperTrend                = input.bool(true, title='SuperTrend confirm', tooltip = 'Not a required! Uses for - Confirm entry to position. Stop-loss confirm. Stop-loss price.', display = display.none, group=ST_GRP)
+float superTrendFactor            = input.float(4, title="Factor", step=0.1, display = display.none, group=ST_GRP)
+int superTrendPeriod              = input.int(20, title="Length", display = display.none, group=ST_GRP)
+[supertrend, supertrendDirection] = ta.supertrend(superTrendFactor, superTrendPeriod)
+
+string MA_GRP       = "Moving average"
+bool useMaStrategy  = input.bool(true, title='Use MA Cross strategy', tooltip = 'Not a required! Uses for - Entry signal to position when signal and basis line cross (MA Cross strategy). When price cross the MA (add. orders #3).', display = display.none, group=MA_GRP)
+string maBasisType  = input.string('sma', 'Basis MA type', ['alma', 'ema', 'dema', 'tema', 'sma', 'smma', 'ssma', 'hma', 'rma', 'swma', 'vwma', 'wma', 'linreg', 'median', 'mom', 'high', 'low', 'medianHigh', 'medianLow', 'percentrank'], group=MA_GRP, display = display.none)
+string maSignalType = input.string('sma', 'Signal MA type', ['alma', 'ema', 'dema', 'tema', 'sma', 'smma', 'ssma', 'hma', 'rma', 'swma', 'vwma', 'wma', 'linreg', 'median', 'mom', 'high', 'low', 'medianHigh', 'medianLow', 'percentrank'], group=MA_GRP, display = display.none)
+float maRatio       = input.float(1.08, 'Ratio', minval=0.01, step=0.02, group=MA_GRP, display = display.none)
+int maMultiplier    = input.int(89, 'Multiplier', minval=1, step=1, group=MA_GRP, tooltip = 'Basis length = Ratio * Multiplier, Signal length = Multiplier', display = display.none)
+int maBasisLengh    = math.round(maRatio * maMultiplier)
+float maBasis       = utils.maCustomseries(priceSource, maBasisType, maBasisLengh)
+float maSignal      = utils.maCustomseries(priceSource, maSignalType, maMultiplier)
+
+string BB_GRP      = "Bollinger Bands"
+string bbType      = input.string('wma', 'Type', ['alma', 'ema', 'dema', 'tema', 'sma', 'smma', 'ssma', 'hma', 'rma', 'swma', 'vwma', 'wma', 'linreg', 'median', 'mom', 'high', 'low', 'medianHigh', 'medianLow', 'percentrank'], tooltip = 'Not a required! Uses for - Take profit. Additionals orders #1 and #2. If use ATR stop-loss, lower and upper line #3 used for stop-loss price update.', group=BB_GRP, display = display.none)
+int bbLength       = input.int(30, 'length', minval=1, step=1, group=BB_GRP, display = display.none)
+float bbMultiplier = input.float(3, minval=1, maxval=50, step=0.1, title="StdDev", group=BB_GRP, display = display.none)
+string useBBLong   = input.string('lower3', '↗️ Long orders :', ['lower', 'lower2', 'lower3', 'upper', 'upper2', 'upper3', 'off'], inline='Short orders', display = display.none)
+string useBBLong2  = input.string('lower2', ' + ', ['lower', 'lower2', 'lower3', 'upper', 'upper2', 'upper3', 'off'], inline='Short orders', display = display.none)
+string useBBLong3  = input.string('off', ' + ', ['basis', 'signal', 'off'], inline='Short orders', display = display.none)
+string useBBShort  = input.string('upper3', '↘️ Short orders:', ['upper', 'upper2', 'upper3', 'lower', 'lower2', 'lower3', 'off'], inline='Long orders', display = display.none)
+string useBBShort2 = input.string('upper2', ' + ', ['upper', 'upper2', 'upper3', 'lower', 'lower2', 'lower3', 'off'], inline='Long orders', display = display.none)
+string useBBShort3 = input.string('off', ' + ', ['basis', 'signal', 'off'], inline='Long orders', display = display.none)
+
+fj_stdev(src, length, mult) =>
+    float basis = utils.maCustomseries(src, bbType, length)
+    float dev   = mult * ta.stdev(src, length)
+    float dev2  = (mult * ta.stdev(src, length)) * 0.618
+    float dev3  = (mult * ta.stdev(src, length)) * 1.618
+    float dev4  = (mult * ta.stdev(src, length)) * 2.618
+    [basis, basis + dev2, basis + dev, basis + dev3, basis + dev4, basis - dev2, basis - dev, basis - dev3, basis - dev4]
+[bbMiddle, bbUpper, bbUpper2, bbUpper3, bbUpper4, bbLower, bbLower2, bbLower3, bbLower4] = fj_stdev(priceSource, bbLength, bbMultiplier)
+
+string TP_GRP          = "Take-Profit"
+bool useTakeProfit     = input.bool(false, title='Use TP orders', tooltip='Take-profit when the Bollinger band 1, 2, 3 crosses', display = display.none, group=TP_GRP)
+bool useTakeProfit2    = input.bool(true, title='Use TP orders 2', display = display.none, group=TP_GRP)
+bool useTakeProfit3    = input.bool(true, title='Use TP orders 3', display = display.none, group=TP_GRP)
+int takeProfitLongQty  = input.int(5, '↗️ Long qty %', minval=0, maxval=100, step=2, inline='takeQty', display = display.none, group=TP_GRP)
+int takeProfitShortQty = input.int(5, '↘️ Short qty %', minval=0, maxval=100, step=2, inline='takeQty', display = display.none, group=TP_GRP)
+
+string LO_GRP                    = "Limit-Orders"
+bool useLimitOrder               = input.bool(false, title='Use limit orders', tooltip = 'Calculate for before each entry order. Long: low price - ATR * Multiplier, Short: high price + ATR * Multiplier', display = display.none, group=LO_GRP)
+int limitOrderPeriod             = input.int(12, 'Length', minval=1, step=1, tooltip = 'ATR', display = display.none, group=LO_GRP)
+float limitOrderMultiplier       = input.float(0.1, 'Multiplier', step=0.1, display = display.none, group=LO_GRP)
+series float limitOrderAtr       = ta.atr(limitOrderPeriod)
+var series float limitOrderPrice = na
+float limitOrderPriceLong        = useLimitOrder ? low - (limitOrderAtr * limitOrderMultiplier) : na
+float limitOrderPriceShort       = useLimitOrder ? high + (limitOrderAtr * limitOrderMultiplier) : na
+
+string SL_GRP                  = "Stop-Loss"
+string stopLossType            = input.string('ATR', 'Stop-loss:', ['off', 'SuperTrend + ATR', 'ATR', 'StdDev'], tooltip = 'Update with each entry order and take profit #3. SuperTrend + ATR: update with each trend change not in our favor. If use "SuperTrend confirm", then the stop loss will require confirmation trend change.', group=SL_GRP, display = display.none)
+int SLAtrPeriod                = input.int(12, title="Length", tooltip = 'ATR and StdDev', display = display.none, group=SL_GRP)
+float SLAtrMultiplierLong      = input.float(6, title="Long mult.", step=0.1, tooltip = 'ATR: low - ATR * Multiplier / SuperTrend: SuperTrend - ATR * Multiplier / StdDev: low - StdDev - ATR * Multiplier', display = display.none, group=SL_GRP)
+float SLAtrMultiplierShort     = input.float(4.3, title="Short mult.", step=0.1, tooltip = 'ATR: high + ATR * Multiplier / SuperTrend: SuperTrend + ATR * Multiplier / StdDev: high + StdDev + ATR * Multiplier', display = display.none, group=SL_GRP)
+series float stopLossAtr       = ta.atr(SLAtrPeriod)
+series float stopLossStdDev    = ta.stdev(priceSource, SLAtrPeriod)
+bool useFlexStopLoss           = input.bool(false, title='Use flex stop-loss for ATR and StdDev', tooltip = 'If the SuperTrend or MA trend changes not in our favor, then adjusting the stop loss.', display = display.none, group=SL_GRP)
+float SLFlexMult               = input.float(0, step=0.1, title="Multiplier", tooltip = 'Long: stop-loss price + (ATR * Multiplier) * Mult. Short: stop-loss price - (ATR * Multiplier) * Mult.', display = display.none, group=SL_GRP)
+var series float stopLossPriceLong = na
+var series float stopLossPriceShort = na
+
+string ALERT_GRP               = "OKX alerts"
+bool useOkxAlert               = input.bool(false, title='OKX Alerts', tooltip = 'Not a required! Uses for - OKX alerts.', display = display.none, group=ALERT_GRP)
+string okx_signalToken         = input("signal_token", "Signal Token _______________________________", group = ALERT_GRP, display = display.none)
+string okx_entryInvestmentType = input.string("percentage_balance", "Investment Type", options = ["margin", "percentage_balance", "percentage_investment"], display = display.none, group = ALERT_GRP)
+float okx_amount               = input.float(5, "Amount", minval = 0.01, display = display.none, group = ALERT_GRP)
+int okx_pyramiding             = input.int(3, "Pyramiding", minval = 1, display = display.none, group = ALERT_GRP)
+string okx_entryType           = useLimitOrder ? 'limit' : 'market'
+string okx_entryPriceOffset    = useLimitOrder ? limitOrderPrice < close ? str.tostring(100 - ((limitOrderPrice / close) * 100)) : str.tostring(100 - (((limitOrderPrice / close) * 100) - 100)) : ''
+string msgFreq                 = alert.freq_once_per_bar_close
+
+string msgOpenLong = utils.okxAlertMsg(
+ action           = 'ENTER_LONG',
+ signalToken      = okx_signalToken,
+ orderType        = okx_entryType,
+ orderPriceOffset = okx_entryPriceOffset,
+ investmentType   = okx_entryInvestmentType,
+ amount           = str.tostring(okx_amount)
+ )
+string msgOpenShort = utils.okxAlertMsg(
+ action           = 'ENTER_SHORT',
+ signalToken      = okx_signalToken,
+ orderType        = okx_entryType,
+ orderPriceOffset = okx_entryPriceOffset,
+ investmentType   = okx_entryInvestmentType,
+ amount           = str.tostring(okx_amount)
+ )
+string msgTakeProfitLong = utils.okxAlertMsg(
+ action           = 'EXIT_LONG',
+ signalToken      = okx_signalToken,
+ orderType        = "market",
+ orderPriceOffset = "",
+ investmentType   = "percentage_position",
+ amount           = str.tostring(takeProfitLongQty)
+ )
+string msgTakeProfitShort = utils.okxAlertMsg(
+ action           = 'EXIT_SHORT',
+ signalToken      = okx_signalToken,
+ orderType        = "market",
+ orderPriceOffset = "",
+ investmentType   = "percentage_position",
+ amount           = str.tostring(takeProfitShortQty)
+ )
+string msgStopLossLong = utils.okxAlertMsg(
+ action           = 'EXIT_LONG',
+ signalToken      = okx_signalToken,
+ orderType        = "market",
+ orderPriceOffset = "",
+ investmentType   = "percentage_position",
+ amount           = "100"
+ )
+string msgStopLossShort = utils.okxAlertMsg(
+ action           = 'EXIT_SHORT',
+ signalToken      = okx_signalToken,
+ orderType        = "market",
+ orderPriceOffset = "",
+ investmentType   = "percentage_position",
+ amount           = "100"
+ )
+
+counterEvent(bool enent, bool enent2) =>
+	int scount = 0
+	scount := enent and enent2 ? nz(scount[1]) + 1 : 0
+
+barCrossoverCounter(float signalPrice, float basePrice) =>
+	bool bcond = signalPrice > basePrice
+	int bcount = 0
+	bcount := bcond ? nz(bcount[1]) + 1 : 0
+barCrossunderCounter(float signalPrice, float basePrice) =>
+	bool scond = signalPrice < basePrice
+	int scount = 0
+	scount := scond ? nz(scount[1]) + 1 : 0
+
+condPositionLong   = strategy.position_size > 0
+condSuperTrendLong = supertrendDirection < 0
+condMaLong         = barsConfirm == barCrossoverCounter(maSignal, maBasis)
+condBasisLong      = barsConfirm == barCrossoverCounter(close, maBasis)
+condSignalLong     = barsConfirm == barCrossoverCounter(close, maSignal)
+condBBLong1        = barsConfirm == barCrossoverCounter(close, bbLower)
+condBBLong2        = barsConfirm == barCrossoverCounter(close, bbLower2)
+condBBLong3        = barsConfirm == barCrossoverCounter(close, bbLower3)
+condBBLong4        = barsConfirm == barCrossoverCounter(close, bbUpper)
+condBBLong5        = barsConfirm == barCrossoverCounter(close, bbUpper2)
+condBBLong6        = barsConfirm == barCrossoverCounter(close, bbUpper3)
+
+condPositionShort   = strategy.position_size < 0
+condSuperTrendShort = supertrendDirection > 0
+condMaShort         = barsConfirm == barCrossunderCounter(maSignal, maBasis)
+condBasisShort      = barsConfirm == barCrossunderCounter(close, maBasis)
+condSignalShort     = barsConfirm == barCrossunderCounter(close, maSignal)
+condBBShort1        = barsConfirm == barCrossunderCounter(close, bbUpper)
+condBBShort2        = barsConfirm == barCrossunderCounter(close, bbUpper2)
+condBBShort3        = barsConfirm == barCrossunderCounter(close, bbUpper3)
+condBBShort4        = barsConfirm == barCrossunderCounter(close, bbLower)
+condBBShort5        = barsConfirm == barCrossunderCounter(close, bbLower2)
+condBBShort6        = barsConfirm == barCrossunderCounter(close, bbLower3)
+
+condTakeLong1 = ta.crossover(high, bbUpper)  and strategy.position_size > 0
+condTakeLong2 = ta.crossover(high, bbUpper2) and strategy.position_size > 0
+condTakeLong3 = ta.crossover(high, bbUpper3) and strategy.position_size > 0
+
+condTakeShort1 = ta.crossunder(low, bbLower)  and strategy.position_size < 0
+condTakeShort2 = ta.crossunder(low, bbLower2) and strategy.position_size < 0
+condTakeShort3 = ta.crossunder(low, bbLower3) and strategy.position_size < 0
+
+condStopLong  = close < stopLossPriceLong  and strategy.position_size > 0
+condStopShort = close > stopLossPriceShort and strategy.position_size < 0
+
+openOrder(simple string direction, simple string orderComment='comment') =>
+	if direction == 'long'
+		if strategy.position_size > 0
+			strategy.cancel("short") // cancel short orders
+			strategy.close("short", qty_percent = 100, comment = "Close short")
+			if useOkxAlert
+				alert(msgStopLossShort, msgFreq)
+		
+		strategy.entry(
+		 "long",
+		 strategy.long,
+		 stop    = stopLossType != 'off' ? stopLossPriceLong : na,
+		 limit   = useLimitOrder ? limitOrderPrice : na,
+		 comment = orderComment
+		 )
+
+		if useOkxAlert and strategy.opentrades < okx_pyramiding
+			alert(msgOpenLong, msgFreq)
+		 
+	if direction == 'short'
+		if strategy.position_size < 0
+			strategy.cancel("long") // cancel long orders
+			strategy.close("long", qty_percent = 100, comment = "Close long")
+			if useOkxAlert
+				alert(msgStopLossLong, msgFreq)
+			
+		strategy.entry(
+		 "short",
+		 strategy.short,
+		 stop    = stopLossType != 'off' ? stopLossPriceShort : na,
+		 limit   = useLimitOrder ? limitOrderPrice : na,
+		 comment = orderComment
+		 )
+
+		if useOkxAlert and strategy.opentrades < okx_pyramiding
+			alert(msgOpenShort, msgFreq)
+
+
+// TRADE LOGIC
+if useSuperTrend
+	// LONG ORDERS WITH SuperTrend
+	//-> Additionals ordrders #1-2
+	if useBBLong == 'lower' or useBBLong2 == 'lower'
+		if condBBLong1 and condSuperTrendLong
+			limitOrderPrice   := limitOrderPriceLong
+			stopLossPriceLong :=
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'ATR'              ? low - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'StdDev'           ? low - stopLossStdDev - (stopLossAtr * SLAtrMultiplierLong) :
+			 na
+			openOrder('long', 'long, cross lower')
+	if useBBLong == 'lower2' or useBBLong2 == 'lower2'
+		if condBBLong2 and condSuperTrendLong
+			limitOrderPrice   := limitOrderPriceLong
+			stopLossPriceLong :=
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'ATR'              ? low - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'StdDev'           ? low - stopLossStdDev - (stopLossAtr * SLAtrMultiplierLong) :
+			 na
+			openOrder('long', 'long, cross lower')
+	if useBBLong == 'lower3' or useBBLong2 == 'lower3'
+		if condBBLong3 and condSuperTrendLong
+			limitOrderPrice    := limitOrderPriceLong
+			stopLossPriceLong  :=
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'ATR'              ? low - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'StdDev'           ? low - stopLossStdDev - (stopLossAtr * SLAtrMultiplierLong) :
+			 na
+			openOrder('long', 'long, cross lower')
+	if useBBLong == 'upper' or useBBLong2 == 'upper'
+		if condBBLong4 and condSuperTrendLong
+			limitOrderPrice   := limitOrderPriceLong
+			stopLossPriceLong :=
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'ATR'              ? low - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'StdDev'           ? low - stopLossStdDev - (stopLossAtr * SLAtrMultiplierLong) :
+			 na
+			openOrder('long', 'long, cross upper')
+	if useBBLong == 'upper2' or useBBLong2 == 'upper2'
+		if condBBLong5 and condSuperTrendLong
+			limitOrderPrice   := limitOrderPriceLong
+			stopLossPriceLong :=
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'ATR'              ? low - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'StdDev'           ? low - stopLossStdDev - (stopLossAtr * SLAtrMultiplierLong) :
+			 na
+			openOrder('long', 'long, cross upper2')
+	if useBBLong == 'upper3' or useBBLong2 == 'upper3'
+		if condBBLong6 and condSuperTrendLong
+			limitOrderPrice   := limitOrderPriceLong
+			stopLossPriceLong :=
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'ATR'              ? low - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'StdDev'           ? low - stopLossStdDev - (stopLossAtr * SLAtrMultiplierLong) :
+			 na
+			openOrder('long', 'long, cross upper3')
+	//-> Additionals ordrders #3
+	if useBBLong3 == 'basis'
+		if condBasisLong and condSuperTrendLong
+			limitOrderPrice   := limitOrderPriceLong
+			stopLossPriceLong :=
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'ATR'              ? low - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'StdDev'           ? low - stopLossStdDev - (stopLossAtr * SLAtrMultiplierLong) :
+			 na
+			openOrder('long', 'long, cross basis')
+	if useBBLong3 == 'signal'
+		if condSignalLong and condSuperTrendLong
+			limitOrderPrice   := limitOrderPriceLong
+			stopLossPriceLong :=
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'ATR'              ? low - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'StdDev'           ? low - stopLossStdDev - (stopLossAtr * SLAtrMultiplierLong) :
+			 na
+			openOrder('long', 'long, cross signal')
+	//-> cross ma strategy
+	if useMaStrategy and condSuperTrendLong and condMaLong
+		limitOrderPrice   := limitOrderPriceLong
+		stopLossPriceLong :=
+		 stopLossType == 'SuperTrend + ATR' ? supertrend[1] - (stopLossAtr * SLAtrMultiplierLong) :
+		 stopLossType == 'ATR'              ? low - (stopLossAtr * SLAtrMultiplierLong) :
+		 stopLossType == 'StdDev'           ? low - stopLossStdDev - (stopLossAtr * SLAtrMultiplierLong) :
+		 na
+		openOrder('long', '[MA] Long')
+
+	// SHORT ORDERS WITH SuperTrend
+	//-> Additionals ordrders #1-2
+	if useBBShort == 'upper' or useBBShort2 == 'upper'
+		if condBBShort1 and condSuperTrendShort
+			limitOrderPrice    := limitOrderPriceShort
+			stopLossPriceShort := 
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'ATR'              ? high + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'StdDev'           ? high + stopLossStdDev + (stopLossAtr * SLAtrMultiplierShort) :
+			 na
+			openOrder('short', 'short, cross upper')
+	if useBBShort == 'upper2' or useBBShort2 == 'upper2'
+		if condBBShort2 and condSuperTrendShort
+			limitOrderPrice    := limitOrderPriceShort
+			stopLossPriceShort := 
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'ATR'              ? high + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'StdDev'           ? high + stopLossStdDev + (stopLossAtr * SLAtrMultiplierShort) :
+			 na
+			openOrder('short', 'short, cross upper2')
+	if useBBShort == 'upper3' or useBBShort2 == 'upper3'
+		if condBBShort3 and condSuperTrendShort
+			limitOrderPrice    := limitOrderPriceShort
+			stopLossPriceShort := 
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'ATR'              ? high + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'StdDev'           ? high + stopLossStdDev + (stopLossAtr * SLAtrMultiplierShort) :
+			 na
+			openOrder('short', 'short, cross upper3')
+	if useBBShort == 'lower' or useBBShort2 == 'lower'
+		if condBBShort4 and condSuperTrendShort
+			limitOrderPrice    := limitOrderPriceShort
+			stopLossPriceShort := 
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'ATR'              ? high + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'StdDev'           ? high + stopLossStdDev + (stopLossAtr * SLAtrMultiplierShort) :
+			 na
+			openOrder('short', 'short, cross lower')
+	if useBBShort == 'lower2' or useBBShort2 == 'lower2'
+		if condBBShort5 and condSuperTrendShort
+			limitOrderPrice    := limitOrderPriceShort
+			stopLossPriceShort := 
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'ATR'              ? high + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'StdDev'           ? high + stopLossStdDev + (stopLossAtr * SLAtrMultiplierShort) :
+			 na
+			openOrder('short', 'short, cross lower2')
+	if useBBShort == 'lower3' or useBBShort2 == 'lower3'
+		if condBBShort6 and condSuperTrendShort
+			limitOrderPrice    := limitOrderPriceShort
+			stopLossPriceShort := 
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'ATR'              ? high + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'StdDev'           ? high + stopLossStdDev + (stopLossAtr * SLAtrMultiplierShort) :
+			 na
+			openOrder('short', 'short, cross lower3')
+	//-> Additionals ordrders #3
+	if useBBShort3 == 'basis'
+		if condBasisShort and condSuperTrendShort
+			limitOrderPrice    := limitOrderPriceShort
+			stopLossPriceShort := 
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'ATR'              ? high + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'StdDev'           ? high + stopLossStdDev + (stopLossAtr * SLAtrMultiplierShort) :
+			 na
+			openOrder('short', 'short, cross basis')
+	if useBBShort3 == 'signal'
+		if condSignalShort and condSuperTrendShort
+			limitOrderPrice    := limitOrderPriceShort
+			stopLossPriceShort := 
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'ATR'              ? high + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'StdDev'           ? high + stopLossStdDev + (stopLossAtr * SLAtrMultiplierShort) :
+			 na
+			openOrder('short', 'short, cross signal')
+	//-> cross ma strategy
+	if useMaStrategy and condSuperTrendShort and condMaShort
+		limitOrderPrice    := limitOrderPriceShort
+		stopLossPriceShort := 
+		 stopLossType == 'SuperTrend + ATR' ? supertrend[1] + (stopLossAtr * SLAtrMultiplierShort) :
+		 stopLossType == 'ATR'              ? high + (stopLossAtr * SLAtrMultiplierShort) :
+		 stopLossType == 'StdDev'           ? high + stopLossStdDev + (stopLossAtr * SLAtrMultiplierShort) :
+		 na
+		openOrder('short', '[MA] Short')
+else
+
+	// LONG ORDERS
+	//-> Additionals ordrders #1-2
+	if useBBLong == 'lower' or useBBLong2 == 'lower'
+		if condBBLong1
+			limitOrderPrice   := limitOrderPriceLong
+			stopLossPriceLong :=
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'ATR'              ? low - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'StdDev'           ? low - stopLossStdDev - (stopLossAtr * SLAtrMultiplierLong) :
+			 na
+			openOrder('long', 'long, cross lower')
+	if useBBLong == 'lower2' or useBBLong2 == 'lower2'
+		if condBBLong2
+			limitOrderPrice   := limitOrderPriceLong
+			stopLossPriceLong :=
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'ATR'              ? low - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'StdDev'           ? low - stopLossStdDev - (stopLossAtr * SLAtrMultiplierLong) :
+			 na
+			openOrder('long', 'long, cross lower')
+	if useBBLong == 'lower3' or useBBLong2 == 'lower3'
+		if condBBLong3
+			limitOrderPrice   := limitOrderPriceLong
+			stopLossPriceLong :=
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'ATR'              ? low - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'StdDev'           ? low - stopLossStdDev - (stopLossAtr * SLAtrMultiplierLong) :
+			 na
+			openOrder('long', 'long, cross lower')
+	if useBBLong == 'upper' or useBBLong2 == 'upper'
+		if condBBLong4
+			limitOrderPrice   := limitOrderPriceLong
+			stopLossPriceLong :=
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'ATR'              ? low - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'StdDev'           ? low - stopLossStdDev - (stopLossAtr * SLAtrMultiplierLong) :
+			 na
+			openOrder('long', 'long, cross upper')
+	if useBBLong == 'upper2' or useBBLong2 == 'upper2'
+		if condBBLong5
+			limitOrderPrice   := limitOrderPriceLong
+			stopLossPriceLong :=
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'ATR'              ? low - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'StdDev'           ? low - stopLossStdDev - (stopLossAtr * SLAtrMultiplierLong) :
+			 na
+			openOrder('long', 'long, cross upper2')
+	if useBBLong == 'upper3' or useBBLong2 == 'upper3'
+		if condBBLong6
+			limitOrderPrice   := limitOrderPriceLong
+			stopLossPriceLong :=
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'ATR'              ? low - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'StdDev'           ? low - stopLossStdDev - (stopLossAtr * SLAtrMultiplierLong) :
+			 na
+			openOrder('long', 'long, cross upper3')
+	//-> Additionals ordrders #3
+	if useBBLong3 == 'basis'
+		if condBasisLong
+			limitOrderPrice   := limitOrderPriceLong
+			stopLossPriceLong :=
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'ATR'              ? low - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'StdDev'           ? low - stopLossStdDev - (stopLossAtr * SLAtrMultiplierLong) :
+			 na
+			openOrder('long', 'long, cross basis')
+	if useBBLong3 == 'signal'
+		if condSignalLong
+			limitOrderPrice   := limitOrderPriceLong
+			stopLossPriceLong :=
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'ATR'              ? low - (stopLossAtr * SLAtrMultiplierLong) :
+			 stopLossType == 'StdDev'           ? low - stopLossStdDev - (stopLossAtr * SLAtrMultiplierLong) :
+			 na
+			openOrder('long', 'long, cross signal')
+	//-> cross ma strategy
+	if useMaStrategy and condMaLong
+		limitOrderPrice   := limitOrderPriceLong
+		stopLossPriceLong :=
+		 stopLossType == 'SuperTrend + ATR' ? supertrend[1] - (stopLossAtr * SLAtrMultiplierLong) :
+		 stopLossType == 'ATR'              ? low - (stopLossAtr * SLAtrMultiplierLong) :
+		 stopLossType == 'StdDev'           ? low - stopLossStdDev - (stopLossAtr * SLAtrMultiplierLong) :
+		 na
+		openOrder('long', '[MA] Long')
+
+	// SHORT ORDERS
+	//-> Additionals ordrders #1-2
+	if useBBShort == 'upper' or useBBShort2 == 'upper'
+		if condBBShort1
+			limitOrderPrice    := limitOrderPriceShort
+			stopLossPriceShort := 
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'ATR'              ? high + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'StdDev'           ? high + stopLossStdDev + (stopLossAtr * SLAtrMultiplierShort) :
+			 na
+			openOrder('short', 'short, cross upper')
+	if useBBShort == 'upper2' or useBBShort2 == 'upper2'
+		if condBBShort2
+			limitOrderPrice    := limitOrderPriceShort
+			stopLossPriceShort := 
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'ATR'              ? high + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'StdDev'           ? high + stopLossStdDev + (stopLossAtr * SLAtrMultiplierShort) :
+			 na
+			openOrder('short', 'short, cross upper2')
+	if useBBShort == 'upper3' or useBBShort2 == 'upper3'
+		if condBBShort3
+			limitOrderPrice    := limitOrderPriceShort
+			stopLossPriceShort := 
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'ATR'              ? high + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'StdDev'           ? high + stopLossStdDev + (stopLossAtr * SLAtrMultiplierShort) :
+			 na
+			openOrder('short', 'short, cross upper3')
+	if useBBShort == 'lower' or useBBShort2 == 'lower'
+		if condBBShort4
+			limitOrderPrice    := limitOrderPriceShort
+			stopLossPriceShort := 
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'ATR'              ? high + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'StdDev'           ? high + stopLossStdDev + (stopLossAtr * SLAtrMultiplierShort) :
+			 na
+			openOrder('short', 'short, cross lower')
+	if useBBShort == 'lower2' or useBBShort2 == 'lower2'
+		if condBBShort5
+			limitOrderPrice    := limitOrderPriceShort
+			stopLossPriceShort := 
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'ATR'              ? high + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'StdDev'           ? high + stopLossStdDev + (stopLossAtr * SLAtrMultiplierShort) :
+			 na
+			openOrder('short', 'short, cross lower2')
+	if useBBShort == 'lower3' or useBBShort2 == 'lower3'
+		if condBBShort6
+			limitOrderPrice    := limitOrderPriceShort
+			stopLossPriceShort := 
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'ATR'              ? high + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'StdDev'           ? high + stopLossStdDev + (stopLossAtr * SLAtrMultiplierShort) :
+			 na
+			openOrder('short', 'short, cross lower3')
+	//-> Additionals ordrders #3
+	if useBBShort3 == 'basis'
+		if condBasisShort
+			limitOrderPrice    := limitOrderPriceShort
+			stopLossPriceShort := 
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'ATR'              ? high + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'StdDev'           ? high + stopLossStdDev + (stopLossAtr * SLAtrMultiplierShort) :
+			 na
+			openOrder('short', 'short, cross basis')
+	if useBBShort3 == 'signal'
+		if condSignalShort
+			limitOrderPrice    := limitOrderPriceShort
+			stopLossPriceShort := 
+			 stopLossType == 'SuperTrend + ATR' ? supertrend[1] + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'ATR'              ? high + (stopLossAtr * SLAtrMultiplierShort) :
+			 stopLossType == 'StdDev'           ? high + stopLossStdDev + (stopLossAtr * SLAtrMultiplierShort) :
+			 na
+			openOrder('short', 'short, cross signal')
+	//-> cross ma strategy
+	if useMaStrategy and condMaShort
+		limitOrderPrice    := limitOrderPriceShort
+		stopLossPriceShort := 
+		 stopLossType == 'SuperTrend + ATR' ? supertrend[1] + (stopLossAtr * SLAtrMultiplierShort) :
+		 stopLossType == 'ATR'              ? high + (stopLossAtr * SLAtrMultiplierShort) :
+		 stopLossType == 'StdDev'           ? high + stopLossStdDev + (stopLossAtr * SLAtrMultiplierShort) :
+		 na
+		openOrder('short', '[MA] Short')
+
+
+//TAKEPROFIT LOGIC
+if useTakeProfit
+	if condTakeLong1
+		if useOkxAlert
+			alert(msgTakeProfitLong, msgFreq)
+		strategy.close("long", qty_percent = takeProfitLongQty, comment = "[TP] long")
+	if condTakeShort1
+		if useOkxAlert
+			alert(msgTakeProfitShort, msgFreq)
+		strategy.close("short", qty_percent = takeProfitShortQty, comment = "[TP] short")
+if useTakeProfit2
+	if condTakeLong2
+		if useOkxAlert
+			alert(msgTakeProfitLong, msgFreq)
+		strategy.close("long", qty_percent = takeProfitLongQty, comment = "[TP] long2")
+	if condTakeShort2
+		if useOkxAlert
+			alert(msgTakeProfitShort, msgFreq)
+		strategy.close("short", qty_percent = takeProfitShortQty, comment = "[TP] short2")
+if useTakeProfit3
+	if condTakeLong3
+		if useOkxAlert
+			alert(msgTakeProfitLong, msgFreq)
+		stopLossPriceLong :=
+		 stopLossType == 'SuperTrend + ATR' ? supertrend[1] - (stopLossAtr * SLAtrMultiplierLong) :
+		 stopLossType == 'ATR'              ? low - (stopLossAtr * SLAtrMultiplierLong) :
+		 stopLossType == 'StdDev'           ? low - stopLossStdDev - (stopLossAtr * SLAtrMultiplierLong) :
+		 na
+		strategy.close("long", qty_percent = takeProfitLongQty, comment = "[TP] long3")
+	if condTakeShort3
+		if useOkxAlert
+			alert(msgTakeProfitShort, msgFreq)
+		stopLossPriceShort := 
+		 stopLossType == 'SuperTrend + ATR' ? supertrend[1] + (stopLossAtr * SLAtrMultiplierShort) :
+		 stopLossType == 'ATR'              ? high + (stopLossAtr * SLAtrMultiplierShort) :
+		 stopLossType == 'StdDev'           ? high + stopLossStdDev + (stopLossAtr * SLAtrMultiplierShort) :
+		 na
+		strategy.close("short", qty_percent = takeProfitShortQty, comment = "[TP] short3")
+
+// STOP-LOSS LOGIC
+if stopLossType == 'SuperTrend + ATR'
+	if barCrossoverCounter(supertrendDirection, 0) == 1 and condPositionLong
+		stopLossPriceLong := supertrend[1] - (stopLossAtr * SLAtrMultiplierLong)
+	if barCrossunderCounter(supertrendDirection, 0) == 1 and condPositionShort
+		stopLossPriceShort := supertrend[1] + (stopLossAtr * SLAtrMultiplierShort)
+
+if useFlexStopLoss
+	if stopLossType == 'ATR' or stopLossType == 'StdDev'
+		if counterEvent(condPositionLong, condSuperTrendShort) == 1
+			stopLossPriceLong := stopLossPriceLong + (stopLossAtr * SLAtrMultiplierLong) * SLFlexMult
+		if counterEvent(condPositionLong, condMaShort) == 1
+			stopLossPriceLong := stopLossPriceLong + (stopLossAtr * SLAtrMultiplierLong) * SLFlexMult
+			
+		if counterEvent(condPositionShort, condSuperTrendLong) == 1
+			stopLossPriceShort := stopLossPriceShort - (stopLossAtr * SLAtrMultiplierShort) * SLFlexMult
+		if counterEvent(condPositionShort, condMaLong) == 1
+			stopLossPriceShort := stopLossPriceShort - (stopLossAtr * SLAtrMultiplierShort) * SLFlexMult
+
+if stopLossType != 'off'
+	if useSuperTrend
+		if condStopLong and condSuperTrendShort
+			strategy.cancel("long") // cancel long orders
+			strategy.close("long", qty_percent = 100, comment = "[SL] long")
+			if useOkxAlert
+				alert(msgStopLossLong, msgFreq)
+		if condStopShort and condSuperTrendLong
+			strategy.cancel("short") // cancel short orders
+			strategy.close("short", qty_percent = 100, comment = "[SL] short")
+			if useOkxAlert
+				alert(msgStopLossShort, msgFreq)
+	else
+		if condStopLong
+			strategy.cancel("long") // cancel long orders
+			strategy.close("long", qty_percent = 100, comment = "[SL] long")
+			if useOkxAlert
+				alert(msgStopLossLong, msgFreq)
+		if condStopShort
+			strategy.cancel("short") // cancel short orders
+			strategy.close("short", qty_percent = 100, comment = "[SL] short")
+			if useOkxAlert
+				alert(msgStopLossShort, msgFreq)
+
+
+// PLOT
+colorGreen   = #00ff08cc
+colorGreen2  = #00ff0863
+colorRed     = #ff0000d4
+colorRed2    = #ff000071
+colorPurple  = #8400ff23
+colorPurple2 = #8400ff6e
+colorPurple3 = #8400ff09
+colorOrange  = #f57b00c7
+
+// SuperTrend
+plot(condSuperTrendLong ? supertrend : na, "[SuperTrend] Up direction", color=colorGreen2, linewidth=3, style=plot.style_steplinebr, display=useSuperTrend ? display.pane : display.none)
+plot(condSuperTrendShort ? supertrend : na, "[SuperTrend] Down direction", color=colorRed2, linewidth=3, style=plot.style_steplinebr, display=useSuperTrend ? display.pane : display.none)
+
+// Moving Averages
+basis = plot(maBasis, "[MA] Basis", color = maSignal > maBasis ? colorGreen2 : colorRed2, linewidth=1, style=plot.style_line, display=display.pane)
+signal = plot(maSignal, "[MA] Signal", color = maSignal > maBasis ? colorGreen2 : colorRed2, linewidth=1, style=plot.style_line, display=display.pane)
+plot(ta.crossover(maSignal, maBasis) ? maBasis : na, "[MA] Long signal", color=colorGreen, style = plot.style_circles, linewidth = 4, display=display.pane)
+plot(ta.crossunder(maSignal, maBasis) ? maBasis : na, "[MA] Short signal", color=colorRed, style = plot.style_circles, linewidth = 4, display=display.pane)
+fill(basis, signal, title = "[MA] Background", color = maSignal > maBasis ? colorGreen2 : colorRed2, display = display.all)
+
+// stoploss
+bool plotCondStopLossLong = useSuperTrend ? condPositionLong and condSuperTrendShort : condPositionLong
+bool plotCondStopLossShort = useSuperTrend ? condPositionShort and condSuperTrendLong : condPositionShort
+plot(condPositionLong? stopLossPriceLong : na, "Stop-loss price: Long", color=plotCondStopLossLong ? colorRed : colorOrange, style = plot.style_linebr, linewidth = 2, display=stopLossType == 'off' ? display.none : display.pane)
+plot(condPositionShort? stopLossPriceShort : na, "Stop-loss price: Short", color=plotCondStopLossShort ? colorRed : colorOrange, style = plot.style_linebr, linewidth = 2, display=stopLossType == 'off' ? display.none : display.pane)
+
+// Bollinger bands
+u1 = plot(bbUpper, "[BB] Upper", color=colorPurple, display = display.pane)
+l1 = plot(bbLower, "[BB] Lower", color=colorPurple, display = display.pane)
+u2 = plot(bbUpper2, "[BB] Upper 2", color=colorPurple, display = display.pane)
+l2 = plot(bbLower2, "[BB] Lower 2", color=colorPurple, display = display.pane)
+u3 = plot(bbUpper3, "[BB] Upper 2", color=colorPurple, display = display.pane)
+l3 = plot(bbLower3, "[BB] Lower 2", color=colorPurple, display = display.pane)
+fill(u1, l1, title = "[BB] Background 1-1", color=colorPurple3, display = display.all)
+fill(u2, l2, title = "[BB] Background 2-2", color=colorPurple3, display = display.all)
+fill(u3, l3, title = "[BB] Background 3-3", color=colorPurple3, display = display.all)
+
+var currentPosition = 'flat'
+currentPosition := strategy.position_size > 0 ? 'long' : 'short'
+if strategy.position_size == 0
+	currentPosition := 'flat'
+var positionTable = table.new(position = position.top_right, columns = 2, rows = 2)
+table.cell(table_id = positionTable, column = 0, row = 0, text = "Position:", bgcolor=colorPurple2, text_color=color.white)
+table.cell(table_id = positionTable, column = 1, row = 0, text = currentPosition, bgcolor=strategy.opentrades == 0 ? colorPurple2 : strategy.position_size < 0 ? colorRed2 : colorGreen, text_color=color.white)
+table.cell(table_id = positionTable, column = 0, row = 1, text = "Amount:", bgcolor=colorPurple2, text_color=color.white)
+table.cell(table_id = positionTable, column = 1, row = 1, text =str.tostring(strategy.position_size), bgcolor=colorPurple2, text_color=color.white)
